@@ -1,0 +1,48 @@
+name: 在庫ページ自動更新
+
+on:
+  schedule:
+    # 毎日 日本時間 朝7時（UTC 22:00）に自動実行
+    - cron: "0 22 * * *"
+  workflow_dispatch: {}
+    # ↑ GitHubの「Actions」タブから手動実行もできるようにする設定
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Pythonをセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 必要なライブラリをインストール
+        run: pip install -r scripts/requirements.txt
+
+      - name: Googleサービスアカウントの認証情報を書き出す
+        run: echo "$GOOGLE_SERVICE_ACCOUNT_KEY" > /tmp/google-credentials.json
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+
+      - name: 在庫ページを再生成
+        run: python scripts/build_inventory.py
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/google-credentials.json
+
+      - name: 変更があればコミット・反映
+        run: |
+          git config user.name "inventory-bot"
+          git config user.email "inventory-bot@users.noreply.github.com"
+          if git diff --quiet -- index.html; then
+            echo "変更なし"
+          else
+            git add index.html
+            git commit -m "在庫ページを自動更新"
+            git push
+          fi
