@@ -250,7 +250,9 @@ def fetch_thumbnail_data():
         print("INFO: APPS_SCRIPT_WEB_APP_URL 未設定のため、スプレッドシートのセル写真は取得しません")
         return {}
     try:
-        resp = requests.get(url, timeout=120)
+        # 車両台数が多いとApps Script側で1台ずつ画像を取りに行く処理に時間がかかるため、
+        # 余裕を持って長めのタイムアウトにしておく
+        resp = requests.get(url, timeout=280)
         resp.raise_for_status()
         data = resp.json()
         if "error" in data:
