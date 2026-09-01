@@ -44,7 +44,11 @@ except Exception:  # noqa: BLE001
 
 # スプレッドシートID（URLの /d/ と /edit の間の文字列）
 SPREADSHEET_ID = "1o9Flp2R2MwFzCMgfzHT1ImisTOSCy5IOgzxv0MpM8Qc"
-SHEET_NAME = "車両一覧"
+
+# 車両一覧タブのID（URLの gid=数字 の部分）。
+# タブの「名前」は将来リネームされる可能性があるため、名前ではなく
+# 変化しないこのID（gid）で対象タブを特定する。
+SHEET_GID = 354030839
 
 # Google Drive 上の「【写真】在庫車両」フォルダのID
 PHOTO_ROOT_FOLDER_ID = "1rUxZ3BD_GUhRbcLaZi7aWcaPKu0jbx3B"
@@ -76,12 +80,27 @@ def get_credentials():
     return service_account.Credentials.from_service_account_file(key_path, scopes=SCOPES)
 
 
-def fetch_sheet_rows(sheets_service):
+def resolve_sheet_title(sheets_service):
+    """SHEET_GID に一致するタブの「現在の名前」を調べて返す（タブがリネームされても追従できるように）"""
+    meta = (
+        sheets_service.spreadsheets()
+        .get(spreadsheetId=SPREADSHEET_ID, fields="sheets.properties")
+        .execute()
+    )
+    for sheet in meta.get("sheets", []):
+        props = sheet.get("properties", {})
+        if props.get("sheetId") == SHEET_GID:
+            return props.get("title")
+    print(f"ERROR: gid={SHEET_GID} のタブが見つかりません", file=sys.stderr)
+    sys.exit(1)
+
+
+def fetch_sheet_rows(sheets_service, sheet_title):
     """車両一覧シートを全部読み込み、ヘッダー行をキーにした辞書のリストで返す"""
     result = (
         sheets_service.spreadsheets()
         .values()
-        .get(spreadsheetId=SPREADSHEET_ID, range=f"{SHEET_NAME}!A:AZ")
+        .get(spreadsheetId=SPREADSHEET_ID, range=f"'{sheet_title}'!A:AZ")
         .execute()
     )
     values = result.get("values", [])
@@ -329,8 +348,12 @@ def main():
     sheets_service = build("sheets", "v4", credentials=creds)
     drive_service = build("drive", "v3", credentials=creds)
 
+    print("車両一覧タブを特定中...")
+    sheet_title = resolve_sheet_title(sheets_service)
+    print(f"  現在のタブ名: {sheet_title}")
+
     print("スプレッドシートを読み込み中...")
-    rows = fetch_sheet_rows(sheets_service)
+    rows = fetch_sheet_rows(sheets_service, sheet_title)
     cars = build_car_records(rows)
     print(f"在庫車両: {len(cars)}台")
 
