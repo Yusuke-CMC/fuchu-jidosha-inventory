@@ -6,14 +6,19 @@
 やっていること:
   1. サービスアカウントでGoogle Sheets APIにアクセスし、「車両一覧」シートから
      ステータスが「在庫」の行だけを取り出す（内部限定列は除外）
-  2. Google Drive の「【写真】在庫車両」フォルダを走査し、各車両（管理№）ごとの
+  2. Apps Script のウェブアプリ（別途デプロイ）を呼び出し、スプレッドシートの
+     写真セル（Z列優先・なければE列）に貼られている画像をサムネイルとして取得する
+  3. Google Drive の「【写真】在庫車両」フォルダを走査し、各車両（管理№）ごとの
      写真フォルダを見つけて画像をダウンロード・リサイズ・base64化する
-  3. リポジトリ内の index.html を読み込み、埋め込まれている
+     （carousel用の追加写真。サムネイルはこれより2の画像が優先される）
+  4. リポジトリ内の index.html を読み込み、埋め込まれている
      FALLBACK_CARS と PHOTO_DATA だけを新しい内容で置き換えて書き戻す
      （デザインやロジック部分のHTML/JS/CSSはそのまま維持される）
 
 このスクリプトは GitHub Actions から定期実行される想定です。
 認証情報は環境変数 GOOGLE_SERVICE_ACCOUNT_KEY_FILE （JSONキーファイルのパス）から読み込みます。
+Apps Script ウェブアプリのURLは環境変数 APPS_SCRIPT_WEB_APP_URL から読み込みます
+（未設定の場合はこの手順をスキップし、Driveの写真だけを使う）。
 """
 
 import base64
@@ -24,9 +29,16 @@ import re
 import sys
 from datetime import datetime, timezone, timedelta
 
+import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from PIL import Image
+
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:  # noqa: BLE001
+    pass
 
 # ============ 設定 ============
 
@@ -209,30 +221,57 @@ def download_and_resize(drive_service, file_id):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def build_photo_data(drive_service, cars, number_to_folder):
+def fetch_thumbnail_data():
+    """Apps Script ウェブアプリから、管理№ -> サムネイル画像(data URL) の辞書を取得する。
+    Z列優先・なければE列、どちらもなければ null が返る（Apps Script側のロジック）。
+    URLが未設定、または取得に失敗した場合は空の辞書を返し、Drive写真だけで動作を継続する。
+    """
+    url = os.environ.get("APPS_SCRIPT_WEB_APP_URL")
+    if not url:
+        print("INFO: APPS_SCRIPT_WEB_APP_URL 未設定のため、スプレッドシートのセル写真は取得しません")
+        return {}
+    try:
+        resp = requests.get(url, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            print(f"WARN: Apps Script側でエラー: {data['error']}", file=sys.stderr)
+            return {}
+        return {k: v for k, v in data.items() if v}
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: Apps Scriptからのサムネイル取得に失敗: {e}", file=sys.stderr)
+        return {}
+
+
+def build_photo_data(drive_service, cars, number_to_folder, thumbnail_data):
     photo_data = {}
     for car in cars:
         no = car["no"]
         folder_id = number_to_folder.get(no)
-        if not folder_id:
-            photo_data[no] = []
-            continue
-        image_files = [
-            f
-            for f in list_children(drive_service, folder_id)
-            if f["mimeType"].startswith("image/")
-        ]
-        # 簡易的なカバー写真選定: ファイル名の昇順で先頭を採用
-        # (人手でのアングル選定ほど精緻ではないが、無人実行のための現実的な妥協)
-        image_files.sort(key=lambda f: f["name"])
         encoded = []
-        for f in image_files:
-            try:
-                encoded.append(f"data:image/jpeg;base64,{download_and_resize(drive_service, f['id'])}")
-            except Exception as e:  # noqa: BLE001
-                print(f"WARN: 写真取得失敗 {no}/{f['name']}: {e}", file=sys.stderr)
+        if folder_id:
+            image_files = [
+                f
+                for f in list_children(drive_service, folder_id)
+                if f["mimeType"].startswith("image/")
+            ]
+            # 簡易的なカバー写真選定: ファイル名の昇順で先頭を採用
+            # (人手でのアングル選定ほど精緻ではないが、無人実行のための現実的な妥協)
+            image_files.sort(key=lambda f: f["name"])
+            for f in image_files:
+                try:
+                    encoded.append(f"data:image/jpeg;base64,{download_and_resize(drive_service, f['id'])}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"WARN: 写真取得失敗 {no}/{f['name']}: {e}", file=sys.stderr)
+
+        thumb = thumbnail_data.get(no)
+        if thumb:
+            # スプレッドシートのセル写真（Z列優先・なければE列）を先頭（サムネイル）に採用
+            encoded = [thumb] + encoded
+
         photo_data[no] = encoded
-        print(f"  管理№{no}: 写真{len(encoded)}枚")
+        source = "セル写真+Drive" if thumb and encoded[1:] else ("セル写真のみ" if thumb else "Driveのみ")
+        print(f"  管理№{no}: 写真{len(encoded)}枚 ({source})")
     return photo_data
 
 
@@ -295,11 +334,15 @@ def main():
     cars = build_car_records(rows)
     print(f"在庫車両: {len(cars)}台")
 
+    print("スプレッドシートのセル写真（サムネイル用）を取得中...")
+    thumbnail_data = fetch_thumbnail_data()
+    print(f"  セル写真が見つかった台数: {len(thumbnail_data)}")
+
     print("Driveの写真フォルダ構成を取得中...")
     number_to_folder = build_number_to_folder_map(drive_service)
 
     print("写真を取得中...")
-    photo_data = build_photo_data(drive_service, cars, number_to_folder)
+    photo_data = build_photo_data(drive_service, cars, number_to_folder, thumbnail_data)
 
     print("index.html を更新中...")
     update_html(cars, photo_data)
