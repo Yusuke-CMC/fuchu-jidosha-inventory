@@ -34,15 +34,26 @@ jobs:
         run: python scripts/build_inventory.py
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY_FILE: /tmp/google-credentials.json
+          APPS_SCRIPT_WEB_APP_URL: ${{ secrets.APPS_SCRIPT_WEB_APP_URL }}
 
       - name: 変更があればコミット・反映
         run: |
           git config user.name "inventory-bot"
           git config user.email "inventory-bot@users.noreply.github.com"
-          if git diff --quiet -- index.html; then
-            echo "変更なし"
-          else
+          cp index.html /tmp/generated-index.html
+          for i in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/generated-index.html index.html
+            if git diff --quiet -- index.html; then
+              echo "変更なし"
+              break
+            fi
             git add index.html
             git commit -m "在庫ページを自動更新"
-            git push
-          fi
+            if git push origin HEAD:main; then
+              echo "反映しました"
+              break
+            fi
+            echo "他の実行と衝突したため再試行します ($i 回目)"
+            sleep 5
