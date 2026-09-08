@@ -27,11 +27,13 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from PIL import Image
 
 try:
@@ -72,6 +74,24 @@ SCOPES = [
 ]
 
 
+def execute_with_retry(request, max_attempts=4, base_delay=3):
+    """Google APIの一時的なエラー（503など）に備えて、指数バックオフで再試行してから .execute() する"""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            if status not in (429, 500, 502, 503, 504) or attempt == max_attempts:
+                raise
+            wait = base_delay * (2 ** (attempt - 1))
+            print(
+                f"WARN: Google APIが一時的に応答しませんでした(status={status})。"
+                f"{wait}秒後に再試行します({attempt}/{max_attempts})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+
 def get_credentials():
     key_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY_FILE")
     if not key_path or not os.path.exists(key_path):
@@ -82,10 +102,8 @@ def get_credentials():
 
 def resolve_sheet_title(sheets_service):
     """SHEET_GID に一致するタブの「現在の名前」を調べて返す（タブがリネームされても追従できるように）"""
-    meta = (
-        sheets_service.spreadsheets()
-        .get(spreadsheetId=SPREADSHEET_ID, fields="sheets.properties")
-        .execute()
+    meta = execute_with_retry(
+        sheets_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID, fields="sheets.properties")
     )
     for sheet in meta.get("sheets", []):
         props = sheet.get("properties", {})
@@ -97,11 +115,10 @@ def resolve_sheet_title(sheets_service):
 
 def fetch_sheet_rows(sheets_service, sheet_title):
     """車両一覧シートを全部読み込み、ヘッダー行をキーにした辞書のリストで返す"""
-    result = (
+    result = execute_with_retry(
         sheets_service.spreadsheets()
         .values()
         .get(spreadsheetId=SPREADSHEET_ID, range=f"'{sheet_title}'!A:AZ")
-        .execute()
     )
     values = result.get("values", [])
     if not values:
@@ -190,15 +207,13 @@ def list_children(drive_service, folder_id):
     files = []
     page_token = None
     while True:
-        resp = (
-            drive_service.files()
-            .list(
+        resp = execute_with_retry(
+            drive_service.files().list(
                 q=f"'{folder_id}' in parents and trashed = false",
                 fields="nextPageToken, files(id, name, mimeType)",
                 pageToken=page_token,
                 pageSize=200,
             )
-            .execute()
         )
         files.extend(resp.get("files", []))
         page_token = resp.get("nextPageToken")
@@ -228,8 +243,7 @@ def build_number_to_folder_map(drive_service):
 
 
 def download_and_resize(drive_service, file_id):
-    request = drive_service.files().get_media(fileId=file_id)
-    raw = request.execute()
+    raw = execute_with_retry(drive_service.files().get_media(fileId=file_id))
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     w, h = img.size
     scale = PHOTO_MAX_SIDE / max(w, h)
