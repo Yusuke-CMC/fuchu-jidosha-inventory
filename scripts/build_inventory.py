@@ -51,6 +51,7 @@ SPREADSHEET_ID = "1o9Flp2R2MwFzCMgfzHT1ImisTOSCy5IOgzxv0MpM8Qc"
 # タブの「名前」は将来リネームされる可能性があるため、名前ではなく
 # 変化しないこのID（gid）で対象タブを特定する。
 SHEET_GID = 354030839
+PRICE_COL_INDEX = 18  # S列（支払総額）: A=0, B=1, ... S=18
 
 # Google Drive 上の「【写真】在庫車両」フォルダのID
 PHOTO_ROOT_FOLDER_ID = "1rUxZ3BD_GUhRbcLaZi7aWcaPKu0jbx3B"
@@ -129,6 +130,8 @@ def fetch_sheet_rows(sheets_service, sheet_title):
         row = {}
         for i, header in enumerate(headers):
             row[header] = raw_row[i] if i < len(raw_row) else ""
+        # 価格はS列（A=0 として 18 番目）を固定で参照する
+        row["__S列"] = raw_row[PRICE_COL_INDEX] if len(raw_row) > PRICE_COL_INDEX else ""
         rows.append(row)
     return rows
 
@@ -193,7 +196,7 @@ def build_car_records(rows):
                 "regDate": (row.get(col_regdate) or "").strip() if col_regdate else "",
                 "mileage": (row.get(col_mileage) or "").strip() if col_mileage else "",
                 "shaken": (row.get(col_shaken) or "").strip() if col_shaken else "",
-                "price": (row.get(col_price) or "").strip() if col_price else "",
+                "price": (row.get("__S列") or "").strip(),
                 "equip": (row.get(col_equip) or "").strip() if col_equip else "",
                 "basePrice": "",
                 "repair": (row.get(col_repair) or "").strip() if col_repair else "",
@@ -348,6 +351,14 @@ def update_html(cars, photo_data):
     obj_start2 = idx2 + len(marker2)
     obj_end2 = extract_balanced(content, obj_start2, "{", "}")
     content = content[:obj_start2] + json.dumps(photo_data, ensure_ascii=False) + content[obj_end2 + 1:]
+
+    # ページ側JSの価格列をS列(index 18)に固定（列追加の影響を受けないようにする）
+    js_old = 'let iPrice = idx("支払総額（税込）万円");'
+    js_new = 'let iPrice = 18; // S列固定'
+    if js_old in content:
+        content = content.replace(js_old, js_new, 1)
+    elif js_new not in content:
+        print("WARN: index.html 内の価格列指定が見つかりませんでした", file=sys.stderr)
 
     # フッターのスナップショット日付を更新（JST基準）
     jst = timezone(timedelta(hours=9))
